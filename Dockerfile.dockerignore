@@ -1,0 +1,10 @@
+# Build context is this repository root; the Lyra source is cloned inside the image.
+# Host-side data directories must never enter the context.
+README.md
+INSTALL_DGX_SPARK.md
+docs
+.env
+*.log
+assets
+outputs
+checkpoints

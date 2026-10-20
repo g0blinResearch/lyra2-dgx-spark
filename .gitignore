@@ -1,0 +1,6 @@
+# host data and local settings; never committed
+.env
+outputs/
+checkpoints/
+assets/
+*.log

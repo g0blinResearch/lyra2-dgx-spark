@@ -1,0 +1,136 @@
+# Lyra 2.0 CLI inference on DGX Spark. Self-contained: the image clones the Lyra source itself.
+#
+#   ./build.sh                                    # builds the image (30-60 min) and fills ./assets from the cloned source
+#   docker compose run --rm lyra2                 # R7: zoom preset on sample 4 with --use_dmd
+#   SAMPLE_ID=7 docker compose run --rm lyra2     # another sample
+#   docker compose run --rm lyra2 zoomgs --sample_id 2 --num_frames_zoom_out 161   # override any flag
+#   docker compose run --rm lyra2 recon --input_video_path outputs/zoomgs/videos/04.mp4
+#   docker compose run --rm lyra2 bash
+#
+# Build arguments (override with --build-arg or in a .env file):
+#   LYRA_REF              git commit/branch/tag of https://github.com/nv-tlabs/lyra to build (default: the verified commit)
+#   MAX_JOBS              parallel nvcc jobs (default 8; memory is shared with the GPU)
+#
+# Host paths (override in a .env file next to this compose.yml, or in the environment). Defaults
+# are relative to this repository root (the directory containing compose.yml):
+#   LYRA_ASSETS_DIR       default ./assets            the host assets directory (samples/, custom_trajectory_examples/,
+#                                                     ...). ./build.sh creates it and copies the cloned
+#                                                     Lyra-2/assets into it (missing files only). Inference reads it.
+#   LYRA_OUTPUT_DIR       default ./outputs           CLI outputs (zoomgs/, custom_traj/, ...) and GUI sessions (gui_sessions/)
+#   LYRA_CHECKPOINTS_DIR  default ./checkpoints      the nvidia/Lyra-2.0 checkpoints/ tree (model/, recon/, ...).
+#                                                     Point it at an empty/nonexistent dir to fall back to the HF cache.
+#   HF_HOME               default ~/.cache/huggingface  Hugging Face cache (umt5 tokenizer, MoGe weights, and the
+#                                                     Lyra snapshot when not using LYRA_CHECKPOINTS_DIR)
+#   TORCH_HOME            default ~/.cache/torch      torch.hub cache (VIPE depth priors)
+services:
+  lyra2:
+    image: lyra2-dgx-spark:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LYRA_REF: ${LYRA_REF:-9fffc9adc37004091ecf26ef03abfb3abdf4d59a}
+        MAX_JOBS: ${MAX_JOBS:-8}
+    user: "${UID:-1000}:${GID:-1000}"
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      SAMPLE_ID: ${SAMPLE_ID:-4}
+      LYRA_HF_DOWNLOAD: ${LYRA_HF_DOWNLOAD:-0}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${LYRA_ASSETS_DIR:-./assets}:/workspace/Lyra-2/assets
+      - ${LYRA_OUTPUT_DIR:-./outputs}:/workspace/Lyra-2/outputs
+      - ${LYRA_CHECKPOINTS_DIR:-./checkpoints}:/models/checkpoints:ro
+      - ${HF_HOME:-~/.cache/huggingface}:/cache/huggingface
+      - ${TORCH_HOME:-~/.cache/torch}:/cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------------------------
+  # Interactive GUI in the browser (GUI_WEB_SERVING.md, Design 1):
+  #   docker compose --profile gui up server gui      # then open http://<spark>:6080/vnc.html
+  #   LYRA_GUI_DUMMY=1 docker compose --profile gui up server gui   # protocol smoke test, no weights
+  # `server` is the inference server (same image, `server` command, reachable as "server:8000" on
+  # the compose network); `gui` runs the native viewer on an in-container NVIDIA X screen with
+  # x11vnc + noVNC. Mouse/keyboard from the browser are injected via XTEST, so the viewer is fully
+  # controllable. Only the noVNC port is published; set LYRA_VNC_PASSWORD for a password prompt.
+  # ---------------------------------------------------------------------------------------------
+  server:
+    profiles: ["gui"]
+    image: lyra2-dgx-spark:latest
+    command: ["server"]
+    user: "${UID:-1000}:${GID:-1000}"
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      LYRA_HF_DOWNLOAD: ${LYRA_HF_DOWNLOAD:-0}
+      HF_TOKEN: ${HF_TOKEN:-}
+      LYRA_GUI_DUMMY: ${LYRA_GUI_DUMMY:-0}
+      LYRA_GUI_OFFLOAD: ${LYRA_GUI_OFFLOAD:-1}
+      LYRA_GUI_OFFLOAD_VAE: ${LYRA_GUI_OFFLOAD_VAE:-0}
+      LYRA_GUI_USE_DMD: ${LYRA_GUI_USE_DMD:-0}
+      LYRA_GUI_SEED: ${LYRA_GUI_SEED:-1}
+    expose:
+      - "8000"
+    # Healthy once the model is loaded and uvicorn answers /metadata; the gui service waits for it.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "25", "http://localhost:8000/metadata"]
+      interval: 30s
+      timeout: 30s
+      retries: 20                # a seeding/generation request occupies the single worker for minutes;
+      start_period: 30m          # weight loading (~95 GB) must not count as failures
+    volumes:
+      - ${LYRA_ASSETS_DIR:-./assets}:/workspace/Lyra-2/assets
+      - ${LYRA_OUTPUT_DIR:-./outputs}:/workspace/Lyra-2/outputs
+      - ${LYRA_CHECKPOINTS_DIR:-./checkpoints}:/models/checkpoints:ro
+      - ${HF_HOME:-~/.cache/huggingface}:/cache/huggingface
+      - ${TORCH_HOME:-~/.cache/torch}:/cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  gui:
+    profiles: ["gui"]
+    image: lyra2-dgx-spark:latest
+    command: ["gui"]
+    user: "0:0"                      # Xorg must run as root inside the container
+    ipc: host
+    restart: on-failure
+    depends_on:
+      server:
+        condition: service_healthy   # plus the entrypoint's own wait loop on /metadata
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: all   # compute + graphics + display: injects the NVIDIA X/GLX driver
+      LYRA_SERVER_HOST: server
+      LYRA_SERVER_PORT: "8000"
+      LYRA_SERVER_WAIT_S: ${LYRA_SERVER_WAIT_S:-3600}
+      LYRA_GUI_SCREEN: ${LYRA_GUI_SCREEN:-1920x1080}
+      LYRA_NOVNC_PORT: ${LYRA_NOVNC_PORT:-6080}
+      LYRA_VNC_PASSWORD: ${LYRA_VNC_PASSWORD:-}
+      LYRA_CLIENT_ARGS: ${LYRA_CLIENT_ARGS:-}
+    ports:
+      - "${LYRA_NOVNC_PORT:-6080}:${LYRA_NOVNC_PORT:-6080}"
+    volumes:
+      - ${LYRA_ASSETS_DIR:-./assets}:/workspace/Lyra-2/assets
+      - ${LYRA_OUTPUT_DIR:-./outputs}:/workspace/Lyra-2/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, graphics, display, utility, compute]

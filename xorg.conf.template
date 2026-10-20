@@ -1,0 +1,51 @@
+# Xorg configuration for the in-container GUI display (Design 1 in GUI_WEB_SERVING.md).
+# A monitor-less NVIDIA screen of fixed size; no input devices (x11vnc injects input via XTEST).
+# Placeholders are filled by entrypoint.sh: @BUSID@ (e.g. PCI:1@15:0:0), @W@, @H@.
+Section "ServerLayout"
+    Identifier     "Layout0"
+    Screen      0  "Screen0" 0 0
+    Option         "AutoAddDevices" "false"
+    Option         "AutoAddGPU" "false"
+EndSection
+
+Section "Files"
+    ModulePath     "/usr/lib/aarch64-linux-gnu/nvidia/xorg"
+    ModulePath     "/usr/lib/xorg/modules"
+EndSection
+
+Section "ServerFlags"
+    Option         "AllowEmptyInput" "true"
+    Option         "AutoAddDevices" "false"
+    Option         "DontVTSwitch" "true"
+EndSection
+
+Section "Monitor"
+    Identifier     "Monitor0"
+    VendorName     "Virtual"
+    ModelName      "Headless"
+    Option         "DPMS" "false"
+EndSection
+
+Section "Device"
+    Identifier     "Device0"
+    Driver         "nvidia"
+    VendorName     "NVIDIA Corporation"
+    BusID          "@BUSID@"
+    Option         "AllowEmptyInitialConfiguration" "true"
+    Option         "UseDisplayDevice" "none"
+    Option         "ConnectedMonitor" "DFP-0"
+    Option         "NoLogo" "true"
+EndSection
+
+Section "Screen"
+    Identifier     "Screen0"
+    Device         "Device0"
+    Monitor        "Monitor0"
+    DefaultDepth    24
+    Option         "AllowEmptyInitialConfiguration" "true"
+    Option         "MetaModes" "@W@x@H@"
+    SubSection     "Display"
+        Depth       24
+        Virtual     @W@ @H@
+    EndSubSection
+EndSection
